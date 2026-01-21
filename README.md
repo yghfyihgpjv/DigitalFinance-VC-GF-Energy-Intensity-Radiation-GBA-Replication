@@ -1,6 +1,6 @@
 # Replication Package README
 
-This repository contains all replication materials for the paper *Beyond a Tale of Two Cores: Asymmetric Digital Finance Exposure and Energy Transition Forecasting in Polycentric Urban Systems*. Running the main script reproduces all empirical results to support the journal's peer review process.
+This repository contains all replication materials for the paper *Asymmetric Digital Finance Exposure and Forecasting Energy Transitions in Polycentric Urban Systems: Beyond a Tale of Two Cores*. Running the main script reproduces all empirical results to support the journal's peer review process.
 ## Data Sources and References
 For replication purposes, please refer to the following authoritative sources:
 - **Digital Finance(DF)**: Guo et al. (2020) [DOI: 10.13821/j.cnki.ceq.2020.03.12]
