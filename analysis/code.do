@@ -1,18 +1,29 @@
+version 17.0
 clear all
 set more off
 set linesize 200
+
 
 *====================================================================
 * 0. 环境设置与日志记录
 *====================================================================
 
-* 请根据实际情况修改路径
-local DATA "C:\Users\Administrator\Desktop\29.dta"
-local desktop_path "C:\Users\Administrator\Desktop"
-local log_file "`desktop_path'\a1_annotated.txt"
+* 使用当前工作目录作为项目根目录
+local ROOT "`c(pwd)'"
+
+* 数据与输出的相对路径
+local DATA "`ROOT'/data/processeddata/29.dta"
+local LOGDIR "`ROOT'/results"
+
+* 如果 results 文件夹不存在，则创建
+capture mkdir "`LOGDIR'"
+
+* 日志文件路径
+local log_file "`LOGDIR'/a1_annotated.txt"
 
 capture log close _all
 log using "`log_file'", text replace
+
 
 * 加载数据
 use "`DATA'", clear
