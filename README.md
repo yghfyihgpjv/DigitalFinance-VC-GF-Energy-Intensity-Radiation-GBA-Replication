@@ -96,3 +96,4 @@ This replication package is provided exclusively for the journal’s peer review
 - Upon the paper’s acceptance, the citation will be updated with formal publication details (volume, issue, pages, DOI).  
 - A permanent access link for the replication materials (e.g., archived GitHub repository) will be added to ensure long-term reproducibility.  
 - For data format clarification: Only `29.dta` is in Stata format (core operational file); all other data files are in Excel (.xls) format for easy access to raw information.
+All scripts use relative paths. Please run the code from the repository root directory.
