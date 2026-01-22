@@ -71,8 +71,7 @@ This script documents the full process of constructing **directed radiation weig
 
 ## 4. How to Replicate
 ### Critical Preparatory Step
-Before running the script, **move the core file `29.dta` from `/data/processeddata/` to your computer’s Desktop** (the main script is set to read the file from the Desktop path).
-
+Before running the script, ensure the processed data file 29.dta remains in the repository at data/processeddata/. The Stata script uses relative paths so you do not need to move any files outside the repository.
 ### Execution Command
 In Stata (Windows/macOS compatible), execute the following command:
 ```stata
