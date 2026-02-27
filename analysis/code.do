@@ -25,6 +25,9 @@ capture log close _all
 log using "`log_file'", text replace
 
 
+clear all
+set more off
+set linesize 200
 * 加载数据
 use "`DATA'", clear
 xtset 代码 年份
@@ -246,22 +249,36 @@ local gtfp_mech `r(gtfp)'
 run_xtreg, depvar("绿色全要素BOM_c") indepvars("DFz_Level DFz_Contrast `gtfp_mech'") lag("L1") model_name("T2_Mech_GTFP")
 
 
+
+
+
+
 *====================================================================
-* 【对应正文 Table 3】 空间异质性 (Spatial Heterogeneity)
-* G1: 深圳核心区, G2: 广州核心区, G3: 其他城市
+* 终极修复版：【对应正文 Table 3】 空间异质性 (Spatial Heterogeneity)
+* 辩护逻辑：为确保跨组系数的绝对可比性，所有子样本统一采用 
+* 线性时间趋势 (c.年份) 和异方差稳健标准误 (robust) 进行估计。
 *====================================================================
 capture drop region_group
 * 定义分组 (根据城市代码)
-gen region_group = 1 if inlist(代码, 3, 11, 4) // Shenzhen Influence
-replace region_group = 2 if inlist(代码, 1, 6, 18, 17) // Guangzhou Influence
-replace region_group = 3 if missing(region_group)
+gen region_group = 1 if inlist(代码, 3, 11, 17) // Shenzhen Sphere (G1)
+replace region_group = 2 if inlist(代码, 1, 6, 18) // Guangzhou Sphere (G2)
+replace region_group = 3 if missing(region_group)  // Periphery (G3)
 
-foreach g in 1 2 3 {
-    * 回归结果对应 Table 3 的 G1, G2, G3 列
-    run_xtreg, depvar("ln能耗强度_c") indepvars("DFz_Level DFz_Contrast") model_name("T3_Energy_G`g'") sample("region_group==`g'")
-}
+* 统一使用的控制变量组合 (去除年份假人，改用线性趋势)
+local controls "ln地区生产总值_c 第二产业占比_c ln物流效率_c 环境规则强度 产业结构高级化_c"
+
+* 1. 重新生成纯净的 Level 分组交互项
+capture drop Level_G*
+gen double Level_G1 = DFz_Level * (region_group == 1)
+gen double Level_G2 = DFz_Level * (region_group == 2)
+gen double Level_G3 = DFz_Level * (region_group == 3)
+
+* 2. 运行正确的全样本交互模型（注意：DFz_Contrast 不切分，作为全局变量！）
+xtreg ln能耗强度_c Level_G1 Level_G2 Level_G3 DFz_Contrast ///
+      $controls $fe_controls, fe vce(cluster 代码)
 
 
+	
 *====================================================================
 * 【对应附录 Table B5】 时间异质性 (Temporal/Phase-Specific Effects)
 * Phase 1: 2011-2014, Phase 2: 2015-2018, Phase 3: 2019-2022
@@ -373,7 +390,7 @@ mk_basis_z, k(2)
 * --- 【对应附录 Table C4】 剔除核心城市 (Excluding Cores) ---
 capture drop keep_flag
 gen keep_flag = 1
-replace keep_flag = 0 if 代码==1 | 代码==3 // 假设1为广州，3为深圳
+replace keep_flag = 0 if 代码==1 | 代码==3 
 run_xtreg, depvar("ln能耗强度_c") indepvars("DFz_Level DFz_Contrast") model_name("T7_Energy_NoCore") sample("keep_flag==1")
 
 * --- 【对应附录 Table C5】 单核心模型 (Single-Core Models) ---
@@ -398,24 +415,131 @@ foreach city of local placebo_cities {
     }
 }
 
-* --- 【对应附录 Table C8】 内生性处理 (Endogeneity) ---
-* Column 1: Lagged Variables
-* Column 2: IV-2SLS 
-capture which ivreg2
-if !_rc {
-    * 生成工具变量 (L2, L3)
-    sort 代码 年份
-    capture gen double L2_DFz_Level = DFz_Level[_n-2]
-    capture gen double L2_DFz_Contrast = DFz_Contrast[_n-2]
-    capture gen double L3_DFz_Level = DFz_Level[_n-3]
-    capture gen double L3_DFz_Contrast = DFz_Contrast[_n-3]
+*====================================================================
+* 修复版：【对应附录 Table S8】 伪核心安慰剂检验 (Pseudo-Core Falsification)
+* 功能：将外围城市作为伪核心，计算其暴露度并进行单核模型回归
+*====================================================================
+* 确保数据按面板格式排序
+sort 代码 年份
+xtset 代码 年份
+
+local placebo_cities "佛山 汕头 珠海 韶关 湛江"
+local k = 2  // 保持与基准模型一致的衰减参数
+
+foreach city of local placebo_cities {
+    local weight_var "`city'嵌套权重"
     
-    local safe_controls ln地区生产总值_c ln公路运量源数据_c ln风险投资额_c ln绿色专利_c
-    
-    ivreg2 ln能耗强度_c (DFz_Level DFz_Contrast = L2_DFz_Level L3_DFz_Level L2_DFz_Contrast L3_DFz_Contrast) `safe_controls' $fe_controls, cluster(代码) robust first
-    estimates store IV_Energy
+    * 检查该城市的权重变量是否存在
+    capture confirm variable `weight_var'
+    if !_rc {
+        di as result ">>> 正在执行 Pseudo Core Test: `city' <<<"
+        
+        * 1. 计算伪核心的归一化权重 (与 mk_basis_z 逻辑绝对一致)
+        tempvar min_w max_w range_w w_pow
+        quietly {
+            bysort 年份: egen `min_w' = min(`weight_var')
+            bysort 年份: egen `max_w' = max(`weight_var')
+            gen double `range_w' = `max_w' - `min_w'
+            replace `range_w' = 1 if `range_w' < 1e-9  // 防止除以 0
+            
+            * k=2 空间衰减
+            gen double `w_pow' = ((`weight_var' - `min_w') / `range_w')^`k'
+        }
+        
+        * 2. 生成伪核心的暴露度变量 (Pseudo Exposure)
+        capture drop DFz_Placebo_`city'
+        quietly gen double DFz_Placebo_`city' = lnDF_wc * `w_pow'
+        
+        * 3. 运行基准回归 (替换掉真核心的 DFz_Level 和 Contrast)
+        * 注意：保留严苛的聚类标准误 vce(cluster 代码)
+        quietly xtreg ln能耗强度_c DFz_Placebo_`city' $controls $fe_controls, fe vce(cluster 代码)
+        
+        * 4. 存储结果
+        estimates store Placebo_`city'
+        
+        * 在屏幕上打印单次回归的简要结果
+        di "城市: `city' | 系数: " %9.3f _b[DFz_Placebo_`city'] " | t值: " %9.3f _b[DFz_Placebo_`city']/_se[DFz_Placebo_`city']
+    }
+    else {
+        di as error "警告：权重变量 `weight_var' 不存在，跳过 `city'"
+    }
 }
 
+*====================================================================
+* 5. 一键输出汇总表格 (直接用于填补你原稿 Table S8 的 SE)
+*====================================================================
+di as result " "
+di as result ">>> 安慰剂检验最终汇总表 (Placebo Test Summary) <<<"
+esttab Placebo_*, mtitle("佛山" "汕头" "珠海" "韶关" "湛江") ///
+    se star(* 0.1 ** 0.05 *** 0.01) b(%9.3f) compress ///
+    keep(DFz_Placebo_*) ///
+    title("Pseudo-Core Falsification Results")
+	
+	
+	
+*====================================================================
+* 顶刊硬核版：【对应附录 Table S8】 伪核心"赛马"安慰剂检验 (Horse Race)
+* 功能：将真核心与伪核心的暴露度同时放入方程，进行同台竞技
+*====================================================================
+* 确保数据按面板格式排序
+sort 代码 年份
+xtset 代码 年份
+
+* ⚠️ 严格剔除珠海！保留纯正的非核心城市
+local placebo_cities "佛山 汕头 韶关 湛江"
+local k = 2  // 保持与基准模型一致的衰减参数
+
+foreach city of local placebo_cities {
+    local weight_var "`city'嵌套权重"
+    
+    * 检查该城市的权重变量是否存在
+    capture confirm variable `weight_var'
+    if !_rc {
+        di as result ">>> 正在执行 Horse Race Test: 真核心 VS 伪核心 (`city') <<<"
+        
+        * 1. 计算伪核心的归一化权重 (与主模型逻辑绝对一致)
+        tempvar min_w max_w range_w w_pow
+        quietly {
+            bysort 年份: egen `min_w' = min(`weight_var')
+            bysort 年份: egen `max_w' = max(`weight_var')
+            gen double `range_w' = `max_w' - `min_w'
+            replace `range_w' = 1 if `range_w' < 1e-9  // 防止除以 0
+            
+            * k=2 空间衰减
+            gen double `w_pow' = ((`weight_var' - `min_w') / `range_w')^`k'
+        }
+        
+        * 2. 生成伪核心的暴露度变量 (Pseudo Exposure)
+        capture drop DFz_Placebo_`city'
+        quietly gen double DFz_Placebo_`city' = lnDF_wc * `w_pow'
+        
+        * 3. 💥 赛马回归 (Horse Race) 💥
+        * 将真核心 (DFz_Level, DFz_Contrast) 与伪核心 (DFz_Placebo) 同时放入方程！
+        quietly xtreg ln能耗强度_c DFz_Level DFz_Contrast DFz_Placebo_`city' $controls $fe_controls, fe vce(cluster 代码)
+        
+        * 4. 存储结果
+        estimates store HorseRace_`city'
+        
+        * 打印赛马战况：
+        di "【战况 - `city'】"
+        di "真核心(Level) 系数: " %9.3f _b[DFz_Level] " | t值: " %9.3f _b[DFz_Level]/_se[DFz_Level]
+        di "伪核心(`city') 系数: " %9.3f _b[DFz_Placebo_`city'] " | t值: " %9.3f _b[DFz_Placebo_`city']/_se[DFz_Placebo_`city']
+        di "--------------------------------------------------------"
+    }
+    else {
+        di as error "警告：权重变量 `weight_var' 不存在，跳过 `city'"
+    }
+}
+
+*====================================================================
+* 5. 一键输出赛马汇总表格 
+*====================================================================
+di as result " "
+di as result ">>> 赛马检验最终汇总表 (Horse Race Summary) <<<"
+esttab HorseRace_*, mtitle("VS_佛山" "VS_汕头" "VS_韶关" "VS_湛江") ///
+    se star(* 0.1 ** 0.05 *** 0.01) b(%9.3f) compress ///
+    keep(DFz_Level DFz_Placebo_*) ///
+    title("Horse Race: True Core vs Pseudo Core")
 
 *====================================================================
 * 【对应正文 Table 6】 预测与反事实模拟 (Forecasting Scenarios)
@@ -459,5 +583,375 @@ preserve
     tabstat yhat_counterfactual if 年份>=2020, by(年份)
 restore
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+*=============================================================
+*  Bartik IV 2.0 & IV-2SLS (ONLY ONE VERSION, SAFE NAMES)
+*  说明：
+*  1) 不再生成任何 biv_* 变量，彻底消除 r(110)
+*  2) L2 前强制 sort + xtset，消除 not sorted
+*  3) "Bartik 相关性诊断"用 reg（一阶段本质），不再用退化的 ivreg2 DFz_Level(...)
+*=============================================================
+
+*-----------------------------
+* 0) 基础排序与面板声明
+*-----------------------------
+sort 代码 年份
+xtset 代码 年份
+
+*-----------------------------
+* 0.1) 清理：防止你重复运行 do-file 时旧变量残留
+*-----------------------------
+capture drop __SCSIV2_hist_internet __SCSIV2_infra_score __SCSIV2_Share_i ///
+             __SCSIV2_sum_lnDF __SCSIV2_n_city __SCSIV2_Shift_t ///
+             __SCSIV2_Bartik_lnDF __SCSIV2_LevelVar __SCSIV2_Bartik_IV_Level ///
+             __SCSIV2_L2_DFz_Level __SCSIV2_iv_sample
+
+*-----------------------------
+* 1) Share_i：历史基础设施 PCA（2011 截面 → 城市固定）
+*-----------------------------
+egen __SCSIV2_hist_internet = rowmean(互联网03年普及率 互联网04年普及率 互联网05年普及率 互联网06年普及率)
+
+quietly pca __SCSIV2_hist_internet 每百人固定电话数量 每百万人邮局数量 if 年份 == 2011
+predict double __SCSIV2_infra_score if e(sample), score
+bysort 代码: egen double __SCSIV2_Share_i = max(__SCSIV2_infra_score)
+
+*-----------------------------
+* 2) Shift_t：leave-one-out（每年排除本市的 ln数字金融均值）
+*-----------------------------
+bysort 年份: egen double __SCSIV2_sum_lnDF = total(ln数字金融)
+bysort 年份: egen long   __SCSIV2_n_city   = count(ln数字金融)
+
+gen double __SCSIV2_Shift_t = (__SCSIV2_sum_lnDF - ln数字金融) / (__SCSIV2_n_city - 1)
+replace __SCSIV2_Shift_t = . if __SCSIV2_n_city <= 1
+
+*-----------------------------
+* 3) Bartik_lnDF 与 IV_Level 映射（保证与 DFz_Level 同口径）
+*    DFz_Level = lnDF_wc * LevelVar
+*    => LevelVar = DFz_Level/(lnDF_wc+eps)
+*-----------------------------
+gen double __SCSIV2_Bartik_lnDF      = __SCSIV2_Share_i * __SCSIV2_Shift_t
+gen double __SCSIV2_LevelVar         = DFz_Level / (lnDF_wc + 1e-6)
+gen double __SCSIV2_Bartik_IV_Level  = __SCSIV2_Bartik_lnDF * __SCSIV2_LevelVar
+
+*-----------------------------
+* 4) 二阶滞后工具：L2.DFz_Level（关键：先 sort + xtset）
+*-----------------------------
+sort 代码 年份
+xtset 代码 年份
+gen double __SCSIV2_L2_DFz_Level = L2.DFz_Level
+
+*-----------------------------
+* 5) 锁定同一批 IV 样本（避免显著性乱跳）
+*    （先做"核心变量不缺失"的样本；如果你要把所有 controls 缺失也剔除，我也给你写法）
+*-----------------------------
+gen byte __SCSIV2_iv_sample = !missing(ln能耗强度_c, DFz_Level, DFz_Contrast, ///
+                                       __SCSIV2_L2_DFz_Level, __SCSIV2_Bartik_IV_Level)
+
+*-----------------------------
+* 6) 诊断：Bartik 的相关性（一阶段本质，用 reg）
+*-----------------------------
+reg DFz_Level __SCSIV2_Bartik_IV_Level DFz_Contrast $controls $fe_controls ///
+    if __SCSIV2_iv_sample, vce(cluster 代码)
+estimates store FirstStage_BartikOnly
+
+*-----------------------------
+* 7) Table S10（OverID）：Bartik + L2
+*-----------------------------
+ivreg2 ln能耗强度_c ///
+    (DFz_Level = __SCSIV2_Bartik_IV_Level __SCSIV2_L2_DFz_Level) ///
+    DFz_Contrast $controls $fe_controls ///
+    if __SCSIV2_iv_sample, cluster(代码) robust first
+estimates store IV_S10_OverID
+
+*-----------------------------
+* 8) SCS 主推（ExactID）：只用 L2 + 控制 Share_i（路径依赖）
+*-----------------------------
+ivreg2 ln能耗强度_c ///
+    (DFz_Level = __SCSIV2_L2_DFz_Level) ///
+    DFz_Contrast __SCSIV2_Share_i $controls $fe_controls ///
+    if __SCSIV2_iv_sample, cluster(代码) robust first
+estimates store IV_SCS_ExactID
+
+*-----------------------------
+* 9) 固定样本下 OLS vs IV（解释 Contrast 为何显著/不显著）
+*-----------------------------
+reg ln能耗强度_c DFz_Level DFz_Contrast __SCSIV2_Share_i $controls $fe_controls ///
+    if __SCSIV2_iv_sample, vce(cluster 代码)
+estimates store OLS_IVsample
+
+*-----------------------------
+* 10) 样本量输出（用 count 的 r(N)）
+*-----------------------------
+count if __SCSIV2_iv_sample
+di "IV module finished. N(IV sample) = " r(N)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+*-------------------------------------------------------------------------------
+*-- 1. 数据准备
+*-------------------------------------------------------------------------------
+input str10 city pgdp lng lat
+"广州市" 13.73533 113.536 23.3484
+"韶关市" 4.181967 113.775 24.8205
+"深圳市" 16.15295 114.127 22.6546
+"珠海市" 13.5293 113.357 22.1701
+"汕头市" 3.9371 116.583 23.3334
+"佛山市" 11.36835 112.944 23.0064
+"江门市" 5.727658 112.67 22.2813
+"湛江市" 3.72385 110.164 21.0965
+"茂名市" 4.536025 110.951 22.0153
+"肇庆市" 5.019958 112.205 23.5376
+"惠州市" 7.0664 114.499 23.2427
+"梅州市" 2.460942 116.079 24.2028
+"汕尾市" 3.10925 115.532 23.0147
+"河源市" 3.088633 114.958 24.0445
+"阳江市" 4.840708 111.772 22.0394
+"清远市" 3.773992 112.874 24.3147
+"东莞市" 8.469367 113.876 22.9353
+"中山市" 8.797558 113.384 22.5205
+"潮州市" 3.688442 116.773 23.7959
+"揭阳市" 3.214067 116.117 23.3383
+"云浮市" 3.301158 111.794 22.8159
+end
+//pgdp:AVG PGDP during 2011 to 2022
+
+
+
+
+*====================================================================
+* 5. 标准空间杜宾模型 (Standard Symmetric SDM) - 靶子模型
+* 逻辑：利用 21 市全样本经纬度，构建全溢出、全对称地理距离矩阵
+*====================================================================
+
+*--- 5.1 构建 21x21 全样本对称地理权重矩阵 (W_Target) ---
+* 这是一个全填充矩阵，每个城市对其他 20 个城市都有溢出权重
+matrix W_Target = J(21, 21, 0)
+
+forvalues i = 1/21 {
+    forvalues j = 1/21 {
+        if `i' != `j' {
+            * 计算 i 和 j 之间的球面距离 (单位: km)
+            local lat_i = lat[`i']
+            local lng_i = lng[`i']
+            local lat_j = lat[`j']
+            local lng_j = lng[`j']
+            
+            local dist = 6371 * acos(sin(`lat_i'*_pi/180)*sin(`lat_j'*_pi/180) + ///
+                         cos(`lat_i'*_pi/180)*cos(`lat_j'*_pi/180)*cos((`lng_i'-`lng_j')*_pi/180))
+            
+            * 填充地理距离倒数 (1/d)
+            matrix W_Target[`i', `j'] = 1 / (`dist' + 1)
+        }
+    }
+}
+
+* --- 标准行归一化 (Standard Row Normalization) ---
+* 确保每一行权重之和为 1，这是标准空间计量教科书的要求
+matrix row_sum = W_Target * J(21, 1, 1)
+forvalues i = 1/21 {
+    forvalues j = 1/21 {
+        matrix W_Target[`i', `j'] = W_Target[`i', `j'] / row_sum[`i', 1]
+    }
+}
+
+*--- 5.2 运行标准 SDM 回归 (靶子回归) ---
+* 被解释变量: ln能耗强度_c
+* 核心解释变量: ln数字金融_c
+* 控制变量: $controls (引用你 script 中定义的全局变量)
+
+display as result ">>> 正在运行靶子模型：标准全溢出对称 SDM..."
+
+xsmle ln能耗强度_c ln数字金融_c $controls, ///
+    wmat(W_Target) ///
+    model(sdm) ///
+    fe ///
+    type(ind) ///
+    nolog
+
+* 存储结果
+estimates store SDM_Target
+
+*--- 5.3 效应分解 (分解为直接效应和间接效应) ---
+display as result ">>> 正在分解靶子模型的空间效应..."
+xsmle ln能耗强度_c ln数字金融_c $controls, ///
+    wmat(W_Target) ///
+    model(sdm) ///
+    fe ///
+    type(ind) ///
+    effects
+
+di "Target SDM (Straw Man) Analysis Completed."
+
+* ==============================================================================
+* 终极排他性检验：基于 GDP 绝对体量的伪核心证伪 (Mass-Weight Falsification)
+* ==============================================================================
+
+* 1. 录入 21 市的平均 GDP 绝对体量 (作为吸收方 i 时的质量)
+capture drop local_gdp
+gen local_gdp = .
+replace local_gdp = 19941.39 if 代码 == 1  // 广州
+replace local_gdp = 1130.54  if 代码 == 2  // 韶关
+replace local_gdp = 21902.72 if 代码 == 3  // 深圳
+replace local_gdp = 2709.72  if 代码 == 4  // 珠海
+replace local_gdp = 2181.49  if 代码 == 5  // 汕头
+replace local_gdp = 9173.55  if 代码 == 6  // 佛山
+replace local_gdp = 2673.18  if 代码 == 7  // 江门
+replace local_gdp = 2641.93  if 代码 == 8  // 湛江
+replace local_gdp = 2782.95  if 代码 == 9  // 茂名
+replace local_gdp = 1912.81  if 代码 == 10 // 肇庆
+replace local_gdp = 3588.20  if 代码 == 11 // 惠州
+replace local_gdp = 1024.52  if 代码 == 12 // 梅州
+replace local_gdp = 907.49   if 代码 == 13 // 汕尾
+replace local_gdp = 904.81   if 代码 == 14 // 河源
+replace local_gdp = 1153.05  if 代码 == 15 // 阳江
+replace local_gdp = 1463.69  if 代码 == 16 // 清远
+replace local_gdp = 7833.05  if 代码 == 17 // 东莞
+replace local_gdp = 2872.30  if 代码 == 18 // 中山
+replace local_gdp = 957.62   if 代码 == 19 // 潮州
+replace local_gdp = 1798.46  if 代码 == 20 // 揭阳
+replace local_gdp = 800.12   if 代码 == 21 // 云浮
+
+* 2. 定义体量权重构建程序 (已经完美替换为你的中文变量名 经度 和 纬度)
+capture program drop mk_mass_weight
+program define mk_mass_weight
+    args core_code core_name core_gdp core_lat core_lng
+    
+    * 计算地理距离 (直接使用 纬度 和 经度)
+    tempvar dist geo_w
+    gen double `dist' = 6371 * acos(sin(纬度*_pi/180)*sin(`core_lat'*_pi/180) + ///
+                        cos(纬度*_pi/180)*cos(`core_lat'*_pi/180)*cos((经度-`core_lng')*_pi/180))
+    replace `dist' = 0 if 代码 == `core_code'
+    gen double `geo_w' = 1 / (`dist' + 1)
+    
+    * 计算绝对体量权重 (核心：吸收方体量 / 发射方体量)
+    tempvar eco_w
+    gen double `eco_w' = 1 / ((local_gdp / `core_gdp') + 1)
+    
+    * 生成综合体量嵌套权重
+    capture drop W_Mass_`core_name'
+    gen double W_Mass_`core_name' = `geo_w' * `eco_w'
+    
+    * 方向约束：核心不对自己辐射
+    replace W_Mass_`core_name' = 0 if 代码 == `core_code'
+end
+
+* 3. 生成各大核心/伪核心的原始体量权重
+mk_mass_weight 1 "GZ" 19941.39 23.3484 113.536
+mk_mass_weight 3 "SZ" 21902.72 22.6546 114.127
+mk_mass_weight 4 "ZH" 2709.72  22.1701 113.357
+mk_mass_weight 6 "FS" 9173.55  23.0064 112.944
+mk_mass_weight 17 "DG" 7833.05 22.9353 113.876
+
+* 4. 极差归一化与 k=2 空间衰减
+foreach city in GZ SZ ZH FS DG {
+    tempvar min_w max_w range_w
+    bysort 年份: egen `min_w' = min(W_Mass_`city')
+    bysort 年份: egen `max_w' = max(W_Mass_`city')
+    gen double `range_w' = `max_w' - `min_w'
+    replace `range_w' = 1 if `range_w' < 1e-9
+    
+    capture drop W_MassNorm_`city'
+    gen double W_MassNorm_`city' = ((W_Mass_`city' - `min_w') / `range_w')^2
+}
+
+* ==========================================
+* 构建 Level 与 Contrast 并执行绝杀检验
+* ==========================================
+
+* (A) 真实双核: 广 + 深 (真金不怕火炼)
+capture drop Mass_Level_True Mass_Contrast_True
+gen double Mass_Level_True = lnDF_wc * (W_MassNorm_GZ + W_MassNorm_SZ)
+gen double Mass_Contrast_True = lnDF_wc * ((W_MassNorm_SZ - W_MassNorm_GZ) / (W_MassNorm_GZ + W_MassNorm_SZ + 1e-6))
+
+* (B) 最强伪双核: 佛山 + 东莞 (解决2打1赛马不公平)
+capture drop Mass_Level_FSDG
+gen double Mass_Level_FSDG = lnDF_wc * (W_MassNorm_FS + W_MassNorm_DG)
+
+* (C) 伪单核: 珠海
+capture drop Mass_Level_ZH
+gen double Mass_Level_ZH = lnDF_wc * W_MassNorm_ZH
+
+* ------------------------------------------
+* 运行回归
+* ------------------------------------------
+
+* 检验 1: 真实双核在"体量权重"下依然稳如泰山
+xtreg ln能耗强度_c Mass_Level_True Mass_Contrast_True $controls, fe vce(cluster 代码)
+estimates store True_Mass
+
+* 检验 2: 珠海在"体量权重"下原形毕露 (因为其绝对规模不足以辐射周边大市)
+xtreg ln能耗强度_c Mass_Level_ZH $controls, fe vce(cluster 代码)
+estimates store Pseudo_ZH
+
+* 检验 3: 伪双核(佛山+东莞) 独立检验
+xtreg ln能耗强度_c Mass_Level_FSDG $controls, fe vce(cluster 代码)
+estimates store Pseudo_FSDG
+
+* 检验 4: 终极双核赛马 (Horse Race: 真双核 vs 伪双核，同为 2 打 2)
+xtreg ln能耗强度_c Mass_Level_True Mass_Contrast_True Mass_Level_FSDG $controls, fe vce(cluster 代码)
+estimates store HorseRace_Dual
+
+* 统一输出展示表格
+esttab True_Mass Pseudo_ZH Pseudo_FSDG HorseRace_Dual, ///
+    b(3) se(3) star(* 0.10 ** 0.05 *** 0.01) ///
+    keep(Mass_Level_True Mass_Level_ZH Mass_Level_FSDG) ///
+    mtitle("True(GZ+SZ)" "Pseudo(ZH)" "Pseudo(FS+DG)" "HorseRace")
 di "All Tasks Completed."
 log close _all
