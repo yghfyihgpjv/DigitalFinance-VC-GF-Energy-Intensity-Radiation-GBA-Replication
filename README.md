@@ -30,7 +30,9 @@ For replication purposes, the main data sources follow established and peer-revi
   Word-frequency intensity of environmental keywords in government work reports, following  
   Shao et al. (2024), *Management World*  
   DOI: 10.19744/j.cnki.11-1235/f.2024.0093
-
+  
+**Historical Information Infrastructure index（PCA）**
+   Chao, X. J., Lian, Y. M., & Luo, L. K. (2021). Impact of new digital infrastructure on the high-quality development of manufacturing industry. Finance and Trade Research, 32(10), 1-13. https://doi.org/10.19337/j.cnki.34-1093/f.2021.10.001
 ---
 
 ## 1. File Structure
@@ -42,6 +44,7 @@ For replication purposes, the main data sources follow established and peer-revi
     gf_index.xls
     vc_index.xls
     vc_micro_firm.xls
+   Historical Information Infrastructure index（PCA）.xls
     测度中国数字普惠金融发展_数据编制与空间特....pdf
     gf_measurement_method.docx
     绿色金融促进城市经济高质量...272个地级市....pdf
