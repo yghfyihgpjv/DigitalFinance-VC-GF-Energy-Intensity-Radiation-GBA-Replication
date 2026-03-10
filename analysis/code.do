@@ -916,6 +916,37 @@ di "Success: IV module executed. N(Sample) = " r(N)
 
 
 
+* 0. 确保恢复完整的 2011-2022 面板数据 (N=252)
+* use "你的原始完整数据路径.dta", clear
+
+* 1. 提取稿件中描述的 2006 历史基底 (Share)
+preserve
+    import excel "全国地级市-数字基础设施测算 .xlsx", sheet("数字基础设施") firstrow clear
+    keep if 年份 == 2006
+    keep 城市 数字基础设施指数
+    rename 数字基础设施指数 IV_2006
+    replace 城市 = subinstr(城市, "市", "", .)
+    tempfile hist_data
+    save "`hist_data'", replace
+restore
+
+capture drop _merge
+capture replace 城市 = subinstr(城市, "市", "", .)
+merge m:1 城市 using "`hist_data'", keep(master match) nogenerate
+
+* 2. 构造真正的基准工具变量：L2.DFz_Level
+sort 代码 年份
+xtset 代码 年份
+capture drop L2_DFz
+* 注意：这里使用的是基准变量 DFz_Level，绝不是 Mass_Level！
+gen double L2_DFz = L2.DFz_Level
+
+* 3. 终极 Exact ID 工具变量回归 (对应稿件 Table 35 第2列)
+* 逻辑：内生变量换回原本的 DFz_Level，控制变量加回 i.年份，不加 fe。
+ivreg2 ln能耗强度_c (DFz_Level = L2_DFz) ///
+    DFz_Contrast $controls IV_2006 i.年份, cluster(代码) robust first
+
+
 
 
 
